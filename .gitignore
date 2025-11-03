@@ -1,0 +1,22 @@
+# Sensitive files (if any private keys or secrets accidentally added)
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+*.pfx
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.bak
+*.log

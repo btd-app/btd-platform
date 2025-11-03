@@ -20,7 +20,7 @@ pipeline {
     }
 
     environment {
-        BTD_APP_ROOT = '/root/projects/btd-app'
+        BTD_APP_ROOT = '/root/projects/btd-platform'
         MICROSERVICES = 'btd-auth-service,btd-users-service,btd-matches-service,btd-messaging-service,btd-notification-service,btd-payment-service,btd-admin-service,btd-analytics-service,btd-ai-service,btd-job-processing-service,btd-location-service,btd-match-request-limits-service,btd-moderation-service,btd-permission-service,btd-travel-service,btd-video-call-service,btd-orchestrator,file-processing-service'
 
         GITHUB_CREDENTIALS_ID = 'github-pat-btd'

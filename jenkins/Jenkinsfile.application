@@ -56,8 +56,8 @@ pipeline {
 
     environment {
         // Application configuration
-        BTD_APP_ROOT = '/root/projects/btd-app'
-        ANSIBLE_DIR = "${BTD_APP_ROOT}/btd-ansible"
+        BTD_APP_ROOT = '/root/projects/btd-platform'
+        ANSIBLE_DIR = '/root/projects/btd-ansible'
         JENKINS_DIR = "${BTD_APP_ROOT}/jenkins"
 
         // Service list

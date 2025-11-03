@@ -47,9 +47,9 @@ pipeline {
         TERRAFORM_STATE_BACKEND = 'consul'
 
         // Paths
-        BTD_APP_ROOT = '/root/projects/btd-app'
+        BTD_APP_ROOT = '/root/projects/btd-platform'
         TERRAFORM_DIR = "${BTD_APP_ROOT}/terraform"
-        ANSIBLE_DIR = "${BTD_APP_ROOT}/btd-ansible"
+        ANSIBLE_DIR = '/root/projects/btd-ansible'
         JENKINS_DIR = "${BTD_APP_ROOT}/jenkins"
 
         // Credentials

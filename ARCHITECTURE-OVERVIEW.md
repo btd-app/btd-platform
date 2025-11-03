@@ -249,13 +249,24 @@ The Ansible playbooks deploy services to the containers provisioned by Terraform
 
 ## Environment Mapping
 
-| Branch | Environment | IP Range | Auto-Deploy | Notes |
-|--------|-------------|----------|-------------|-------|
-| `develop` | Development | 10.27.26.80-97 | Yes | Automatic on push |
-| `staging` | Staging | 10.27.26.180-197 | Yes | Automatic on push |
-| `main` | Production | 10.27.27.80-97 | Manual approval | Current active range |
+### ⚠️ IMPORTANT: Single Environment Reality
 
-**Current Note**: Documentation shows multi-environment IP ranges, but actual implementation uses single range (10.27.27.80-97). Environment separation would require Terraform refactoring.
+**Current Implementation**: All branches deploy to the **same IP range** (10.27.27.80-97)
+
+| Branch | Intended Environment | Actual IP Range | Status |
+|--------|---------------------|-----------------|--------|
+| `develop` | Development | 10.27.27.80-97 | ⚠️ Shares containers with staging/production |
+| `staging` | Staging | 10.27.27.80-97 | ⚠️ Shares containers with develop/production |
+| `main` | Production | 10.27.27.80-97 | ✅ Active (overwrites other branches) |
+
+**Reality**: Only ONE environment exists at a time. Deploying to different branches **overwrites** the previous deployment on the same container.
+
+**Documented (but not implemented)**:
+- Development: 10.27.26.80-97
+- Staging: 10.27.26.180-197
+- Production: 10.27.27.80-97
+
+See [MULTI-ENVIRONMENT-STATUS.md](./MULTI-ENVIRONMENT-STATUS.md) for full details and implementation options.
 
 ---
 

@@ -1,10 +1,4 @@
-# Infrastructure Sync
+## Webhook Status
 
-This repository now automatically syncs with Jenkins via GitHub webhooks.
-
-## GitHub Webhook Integration
-
-Webhook URL: https://jenkins.bknight.dev/github-webhook/
-Status: Active ✓
-
-Last tested: $(date)
+Last updated: Mon Nov  3 22:12:10 UTC 2025
+Status: Testing automatic triggers...

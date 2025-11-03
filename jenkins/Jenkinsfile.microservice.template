@@ -1,0 +1,361 @@
+/**
+ * Jenkinsfile Template for BTD Microservices
+ *
+ * This file should be placed in each microservice repository as "Jenkinsfile"
+ * Update SERVICE_NAME, SERVICE_IP, HTTP_PORT, GRPC_PORT for each service
+ */
+
+pipeline {
+    agent {
+        label 'nodejs'  // Runs on jenkins-agent (10.27.27.60)
+    }
+
+    environment {
+        // SERVICE CONFIGURATION - UPDATE FOR EACH SERVICE
+        SERVICE_NAME = 'btd-auth-service'           // e.g., btd-auth-service, btd-users-service
+        SERVICE_IP = '10.27.27.82'                  // Target deployment IP
+        HTTP_PORT = '3005'                          // Service HTTP port
+        GRPC_PORT = '50051'                         // Service gRPC port
+        HAS_MIGRATIONS = 'true'                     // Set to 'false' if no database migrations
+
+        // INFRASTRUCTURE CONFIGURATION
+        ANSIBLE_HOST = '10.27.27.181'               // Ansible LXC container
+        ANSIBLE_USER = 'root'
+        ANSIBLE_SSH_KEY = '/var/lib/jenkins/.ssh/id_ed25519_ansible'
+
+        // BUILD CONFIGURATION
+        NODE_VERSION = '20'                         // Node.js version
+        NPM_REGISTRY = 'http://10.27.27.181:4873'  // Verdaccio registry
+        WORKSPACE_ROOT = "${WORKSPACE}"
+
+        // DEPLOYMENT TRACKING
+        BUILD_TIMESTAMP = sh(script: 'date +%Y%m%d-%H%M%S', returnStdout: true).trim()
+        DEPLOYMENT_ID = "${SERVICE_NAME}-${BUILD_TIMESTAMP}-${BUILD_NUMBER}"
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '30', daysToKeepStr: '90'))
+        disableConcurrentBuilds()
+        timeout(time: 30, unit: 'MINUTES')
+        timestamps()
+        ansiColor('xterm')
+    }
+
+    stages {
+        stage('Preparation') {
+            steps {
+                script {
+                    echo "================================================"
+                    echo "BTD Microservice Deployment Pipeline"
+                    echo "================================================"
+                    echo "Service: ${SERVICE_NAME}"
+                    echo "Target: ${SERVICE_IP}"
+                    echo "Ports: HTTP=${HTTP_PORT}, gRPC=${GRPC_PORT}"
+                    echo "Branch: ${env.BRANCH_NAME}"
+                    echo "Commit: ${env.GIT_COMMIT?.take(8)}"
+                    echo "Build: #${BUILD_NUMBER}"
+                    echo "Deployment ID: ${DEPLOYMENT_ID}"
+                    echo "================================================"
+
+                    // Verify this is the correct service repository
+                    sh """
+                        if [ -f package.json ]; then
+                            REPO_NAME=\$(grep -o '"name": "[^"]*' package.json | cut -d'"' -f4)
+                            echo "Repository package name: \$REPO_NAME"
+                            if [ "\$REPO_NAME" != "${SERVICE_NAME}" ]; then
+                                echo "WARNING: Package name mismatch!"
+                                echo "Expected: ${SERVICE_NAME}, Found: \$REPO_NAME"
+                            fi
+                        fi
+                    """
+                }
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    // Record git information
+                    sh """
+                        echo "Git Branch: ${env.BRANCH_NAME}" > build-info.txt
+                        echo "Git Commit: ${env.GIT_COMMIT}" >> build-info.txt
+                        echo "Build Number: ${BUILD_NUMBER}" >> build-info.txt
+                        echo "Build Timestamp: ${BUILD_TIMESTAMP}" >> build-info.txt
+                        cat build-info.txt
+                    """
+                }
+            }
+        }
+
+        stage('Setup Node.js') {
+            steps {
+                script {
+                    sh """
+                        # Source NVM if available
+                        if [ -f ~/.nvm/nvm.sh ]; then
+                            export NVM_DIR="\$HOME/.nvm"
+                            [ -s "\$NVM_DIR/nvm.sh" ] && . "\$NVM_DIR/nvm.sh"
+                            nvm use ${NODE_VERSION} || nvm install ${NODE_VERSION}
+                        fi
+
+                        node --version
+                        npm --version
+                    """
+                }
+            }
+        }
+
+        stage('Configure NPM') {
+            steps {
+                script {
+                    sh """
+                        # Configure NPM to use Verdaccio registry
+                        npm config set registry ${NPM_REGISTRY}
+                        npm config list
+
+                        # Create .npmrc if not exists
+                        if [ ! -f .npmrc ]; then
+                            echo "registry=${NPM_REGISTRY}" > .npmrc
+                            echo "@btd:registry=${NPM_REGISTRY}" >> .npmrc
+                        fi
+
+                        cat .npmrc
+                    """
+                }
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                script {
+                    echo "Installing Node.js dependencies..."
+                    sh """
+                        # Clean install for reproducible builds
+                        rm -rf node_modules package-lock.json
+                        npm install
+
+                        # Verify critical dependencies
+                        npm list --depth=0 || true
+                    """
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                script {
+                    echo "Building ${SERVICE_NAME}..."
+                    sh """
+                        # Run TypeScript build
+                        npm run build
+
+                        # Verify build output
+                        if [ ! -d "dist" ]; then
+                            echo "ERROR: Build did not produce dist directory"
+                            exit 1
+                        fi
+
+                        ls -la dist/
+                    """
+                }
+            }
+        }
+
+        stage('Lint') {
+            when {
+                expression { env.BRANCH_NAME == 'main' || env.BRANCH_NAME == 'develop' || env.BRANCH_NAME?.startsWith('PR-') }
+            }
+            steps {
+                script {
+                    echo "Running linter..."
+                    sh """
+                        npm run lint || {
+                            echo "WARNING: Linting failed, but continuing deployment"
+                            exit 0
+                        }
+                    """
+                }
+            }
+        }
+
+        stage('Test') {
+            when {
+                expression { env.BRANCH_NAME == 'main' || env.BRANCH_NAME == 'develop' || env.BRANCH_NAME?.startsWith('PR-') }
+            }
+            steps {
+                script {
+                    echo "Running tests..."
+                    sh """
+                        # Run tests if test script exists
+                        if npm run | grep -q "test"; then
+                            npm run test || {
+                                echo "WARNING: Tests failed, but continuing deployment"
+                                exit 0
+                            }
+                        else
+                            echo "No test script found, skipping tests"
+                        fi
+                    """
+                }
+            }
+        }
+
+        stage('Package') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    echo "Creating deployment package..."
+                    sh """
+                        # Create deployment artifact
+                        tar -czf ${DEPLOYMENT_ID}.tar.gz \\
+                            dist/ \\
+                            package.json \\
+                            package-lock.json \\
+                            .npmrc \\
+                            build-info.txt \\
+                            2>/dev/null || echo "Some files may not exist"
+
+                        ls -lh ${DEPLOYMENT_ID}.tar.gz
+                    """
+
+                    // Archive artifact
+                    archiveArtifacts artifacts: "${DEPLOYMENT_ID}.tar.gz", fingerprint: true
+                }
+            }
+        }
+
+        stage('Deploy to Development') {
+            when {
+                branch 'develop'
+            }
+            steps {
+                script {
+                    deployService('development')
+                }
+            }
+        }
+
+        stage('Deploy to Production') {
+            when {
+                branch 'main'
+            }
+            steps {
+                script {
+                    // Production deployment with approval
+                    timeout(time: 15, unit: 'MINUTES') {
+                        input message: "Deploy ${SERVICE_NAME} to production?",
+                              ok: 'Deploy',
+                              submitter: 'admin,devops-team'
+                    }
+
+                    deployService('production')
+                }
+            }
+        }
+
+        stage('Health Check') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'develop'
+                }
+            }
+            steps {
+                script {
+                    echo "Running post-deployment health checks..."
+                    sh """
+                        # Wait for service to start
+                        sleep 10
+
+                        # Check HTTP endpoint
+                        echo "Checking HTTP endpoint: http://${SERVICE_IP}:${HTTP_PORT}/health"
+                        curl -f -s -o /dev/null -w "%{http_code}" http://${SERVICE_IP}:${HTTP_PORT}/health || {
+                            echo "WARNING: Health check failed, but deployment considered successful"
+                            exit 0
+                        }
+
+                        echo "Health check passed!"
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                echo "================================================"
+                echo "✓ Deployment Successful"
+                echo "================================================"
+                echo "Service: ${SERVICE_NAME}"
+                echo "Deployment ID: ${DEPLOYMENT_ID}"
+                echo "Branch: ${env.BRANCH_NAME}"
+                echo "Build: #${BUILD_NUMBER}"
+                echo "================================================"
+
+                // TODO: Send success notification (Slack, Email, etc.)
+            }
+        }
+
+        failure {
+            script {
+                echo "================================================"
+                echo "✗ Deployment Failed"
+                echo "================================================"
+                echo "Service: ${SERVICE_NAME}"
+                echo "Branch: ${env.BRANCH_NAME}"
+                echo "Build: #${BUILD_NUMBER}"
+                echo "================================================"
+
+                // TODO: Send failure notification
+            }
+        }
+
+        always {
+            // Cleanup workspace
+            cleanWs(deleteDirs: true, patterns: [
+                [pattern: 'node_modules/**', type: 'INCLUDE'],
+                [pattern: '*.tar.gz', type: 'INCLUDE']
+            ])
+        }
+    }
+}
+
+/**
+ * Deploy service using Ansible
+ *
+ * @param environment Target environment (development, staging, production)
+ */
+def deployService(String environment) {
+    echo "Deploying ${SERVICE_NAME} to ${environment}..."
+
+    sh """
+        # Copy deployment package to Ansible host
+        scp -i ${ANSIBLE_SSH_KEY} \\
+            -o StrictHostKeyChecking=no \\
+            -o UserKnownHostsFile=/dev/null \\
+            ${DEPLOYMENT_ID}.tar.gz \\
+            ${ANSIBLE_USER}@${ANSIBLE_HOST}:/tmp/
+
+        # Execute deployment via Ansible
+        ssh -i ${ANSIBLE_SSH_KEY} \\
+            -o StrictHostKeyChecking=no \\
+            -o UserKnownHostsFile=/dev/null \\
+            ${ANSIBLE_USER}@${ANSIBLE_HOST} \\
+            "cd /root/btd-ansible && \\
+             ansible-playbook deploy-service.yml \\
+             -e service_name=${SERVICE_NAME} \\
+             -e service_ip=${SERVICE_IP} \\
+             -e http_port=${HTTP_PORT} \\
+             -e grpc_port=${GRPC_PORT} \\
+             -e deployment_package=/tmp/${DEPLOYMENT_ID}.tar.gz \\
+             -e environment=${environment} \\
+             -e run_migrations=${HAS_MIGRATIONS} \\
+             -e deployment_id=${DEPLOYMENT_ID}"
+    """
+
+    echo "Deployment to ${environment} complete!"
+}

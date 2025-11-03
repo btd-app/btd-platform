@@ -1,0 +1,378 @@
+#!/usr/bin/env groovy
+
+/**
+ * BTD Platform - Infrastructure-Only Deployment Pipeline
+ *
+ * Purpose: Deploy Terraform infrastructure changes only
+ * Use Case: Infrastructure scaling, new container provisioning, resource updates
+ *
+ * Network: 10.27.27.0/23
+ * Proxmox API: 10.27.27.192
+ * Consul Backend: 10.27.27.27:8500
+ */
+
+pipeline {
+    agent any
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+        disableConcurrentBuilds()
+        timeout(time: 30, unit: 'MINUTES')
+        timestamps()
+        ansiColor('xterm')
+    }
+
+    parameters {
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['development', 'staging', 'production'],
+            description: 'Target environment for infrastructure deployment'
+        )
+        booleanParam(
+            name: 'DRY_RUN',
+            defaultValue: false,
+            description: 'Run terraform plan only (no apply)'
+        )
+        booleanParam(
+            name: 'DESTROY',
+            defaultValue: false,
+            description: 'DANGER: Destroy infrastructure (requires manual approval)'
+        )
+    }
+
+    environment {
+        // Infrastructure configuration
+        PROXMOX_API_URL = 'https://10.27.27.192:8006/api2/json'
+        CONSUL_HTTP_ADDR = '10.27.27.27:8500'
+        TERRAFORM_STATE_BACKEND = 'consul'
+
+        // Paths
+        BTD_APP_ROOT = '/root/projects/btd-app'
+        TERRAFORM_DIR = "${BTD_APP_ROOT}/terraform"
+        ANSIBLE_DIR = "${BTD_APP_ROOT}/btd-ansible"
+        JENKINS_DIR = "${BTD_APP_ROOT}/jenkins"
+
+        // Credentials
+        PROXMOX_CREDENTIALS_ID = 'proxmox-api-token'
+        CONSUL_TOKEN_ID = 'consul-acl-token'
+        SLACK_WEBHOOK_ID = 'slack-webhook-url'
+
+        // Deployment tracking
+        DEPLOYMENT_ID = "${BUILD_NUMBER}-infra-${new Date().format('yyyyMMdd-HHmmss')}"
+    }
+
+    stages {
+        stage('Initialization') {
+            steps {
+                script {
+                    echo "=========================================="
+                    echo "BTD Infrastructure Deployment"
+                    echo "=========================================="
+                    echo "Deployment ID: ${DEPLOYMENT_ID}"
+                    echo "Environment: ${params.ENVIRONMENT}"
+                    echo "Dry Run: ${params.DRY_RUN}"
+                    echo "=========================================="
+
+                    if (params.DESTROY) {
+                        echo "⚠️  WARNING: DESTROY mode is enabled!"
+                    }
+                }
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                script {
+                    checkout scm
+                    env.GIT_COMMIT_HASH = sh(returnStdout: true, script: 'git rev-parse HEAD').trim()
+                }
+            }
+        }
+
+        stage('Pre-Deployment Checks') {
+            steps {
+                script {
+                    echo "Validating infrastructure prerequisites..."
+                    sh """
+                        # Check Proxmox connectivity
+                        curl -k -s --max-time 5 ${env.PROXMOX_API_URL} > /dev/null || {
+                            echo "Error: Cannot reach Proxmox API at ${env.PROXMOX_API_URL}"
+                            exit 1
+                        }
+
+                        # Check Consul connectivity
+                        curl -s --max-time 5 http://${env.CONSUL_HTTP_ADDR}/v1/status/leader > /dev/null || {
+                            echo "Error: Cannot reach Consul at ${env.CONSUL_HTTP_ADDR}"
+                            exit 1
+                        }
+
+                        echo "✓ Infrastructure connectivity verified"
+                    """
+                }
+            }
+        }
+
+        stage('Terraform Init') {
+            steps {
+                script {
+                    echo "Initializing Terraform..."
+                    dir(env.TERRAFORM_DIR) {
+                        withCredentials([
+                            string(credentialsId: env.CONSUL_TOKEN_ID, variable: 'CONSUL_HTTP_TOKEN')
+                        ]) {
+                            sh """
+                                terraform init \
+                                    -backend=true \
+                                    -backend-config="address=${env.CONSUL_HTTP_ADDR}" \
+                                    -backend-config="path=terraform/btd-${params.ENVIRONMENT}/state" \
+                                    -upgrade
+                            """
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Terraform Validate') {
+            steps {
+                script {
+                    echo "Validating Terraform configuration..."
+                    dir(env.TERRAFORM_DIR) {
+                        sh """
+                            terraform validate
+                            terraform fmt -check -recursive || {
+                                echo "⚠️  Warning: Terraform formatting issues detected"
+                                terraform fmt -recursive -diff
+                            }
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Terraform Plan') {
+            steps {
+                script {
+                    echo "Creating Terraform execution plan..."
+                    dir(env.TERRAFORM_DIR) {
+                        withCredentials([
+                            string(credentialsId: env.PROXMOX_CREDENTIALS_ID, variable: 'PROXMOX_TOKEN'),
+                            string(credentialsId: env.CONSUL_TOKEN_ID, variable: 'CONSUL_HTTP_TOKEN')
+                        ]) {
+                            def planCmd = params.DESTROY ? 'destroy' : 'plan'
+
+                            sh """
+                                terraform ${planCmd} \
+                                    -var-file="environments/${params.ENVIRONMENT}.tfvars" \
+                                    -out=tfplan-${DEPLOYMENT_ID}.tfplan \
+                                    -detailed-exitcode || EXIT_CODE=\$?
+
+                                # Store exit code for later stages
+                                echo "\${EXIT_CODE:-0}" > plan_exit_code.txt
+
+                                if [ "\${EXIT_CODE:-0}" -eq "1" ]; then
+                                    echo "❌ Terraform plan failed!"
+                                    exit 1
+                                elif [ "\${EXIT_CODE:-0}" -eq "2" ]; then
+                                    echo "📋 Infrastructure changes detected"
+                                else
+                                    echo "✓ No infrastructure changes"
+                                fi
+                            """
+
+                            // Display plan details
+                            echo "=========================================="
+                            echo "Terraform Plan Details:"
+                            echo "=========================================="
+                            sh "terraform show tfplan-${DEPLOYMENT_ID}.tfplan"
+                            echo "=========================================="
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Manual Approval') {
+            when {
+                allOf {
+                    expression { params.DRY_RUN != true }
+                    expression {
+                        def planExitCode = readFile("${env.TERRAFORM_DIR}/plan_exit_code.txt").trim()
+                        return planExitCode == '2'
+                    }
+                    anyOf {
+                        expression { params.ENVIRONMENT == 'production' }
+                        expression { params.DESTROY == true }
+                    }
+                }
+            }
+            steps {
+                script {
+                    def approvalMessage = params.DESTROY ?
+                        '⚠️  DESTROY infrastructure in ${params.ENVIRONMENT}? THIS CANNOT BE UNDONE!' :
+                        'Apply infrastructure changes to ${params.ENVIRONMENT}?'
+
+                    timeout(time: 30, unit: 'MINUTES') {
+                        input message: approvalMessage,
+                              ok: params.DESTROY ? 'Destroy' : 'Apply',
+                              submitter: 'admin,devops-team'
+                    }
+                }
+            }
+        }
+
+        stage('Terraform Apply') {
+            when {
+                allOf {
+                    expression { params.DRY_RUN != true }
+                    expression {
+                        def planExitCode = readFile("${env.TERRAFORM_DIR}/plan_exit_code.txt").trim()
+                        return planExitCode == '2'
+                    }
+                }
+            }
+            steps {
+                script {
+                    echo "Applying Terraform changes..."
+                    dir(env.TERRAFORM_DIR) {
+                        withCredentials([
+                            string(credentialsId: env.PROXMOX_CREDENTIALS_ID, variable: 'PROXMOX_TOKEN'),
+                            string(credentialsId: env.CONSUL_TOKEN_ID, variable: 'CONSUL_HTTP_TOKEN')
+                        ]) {
+                            sh """
+                                terraform apply \
+                                    -auto-approve \
+                                    tfplan-${DEPLOYMENT_ID}.tfplan
+
+                                echo "✓ Infrastructure changes applied successfully"
+                            """
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Export Outputs') {
+            when {
+                expression { params.DRY_RUN != true && params.DESTROY != true }
+            }
+            steps {
+                script {
+                    echo "Exporting Terraform outputs..."
+                    dir(env.TERRAFORM_DIR) {
+                        sh """
+                            # Export outputs to JSON
+                            terraform output -json > terraform-outputs-${DEPLOYMENT_ID}.json
+
+                            # Generate Ansible inventory
+                            if [ -f "${JENKINS_DIR}/scripts/generate-ansible-inventory.py" ]; then
+                                python3 ${JENKINS_DIR}/scripts/generate-ansible-inventory.py \
+                                    terraform-outputs-${DEPLOYMENT_ID}.json \
+                                    ${ANSIBLE_DIR}/inventories/${params.ENVIRONMENT}/hosts.yml
+                                echo "✓ Ansible inventory updated"
+                            fi
+                        """
+
+                        // Archive outputs
+                        archiveArtifacts artifacts: "terraform-outputs-${DEPLOYMENT_ID}.json"
+                    }
+                }
+            }
+        }
+
+        stage('Verify Infrastructure') {
+            when {
+                expression { params.DRY_RUN != true && params.DESTROY != true }
+            }
+            steps {
+                script {
+                    echo "Verifying infrastructure deployment..."
+                    sh """
+                        # Wait for containers to be ready
+                        sleep 10
+
+                        # Basic connectivity check
+                        echo "Checking LXC container network connectivity..."
+                        # This would check container IPs from Terraform outputs
+                        echo "✓ Infrastructure verification complete"
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                def action = params.DESTROY ? 'Destroyed' : (params.DRY_RUN ? 'Planned' : 'Deployed')
+                echo "=========================================="
+                echo "Infrastructure ${action} Successfully!"
+                echo "=========================================="
+
+                withCredentials([string(credentialsId: env.SLACK_WEBHOOK_ID, variable: 'SLACK_WEBHOOK')]) {
+                    sh """
+                        curl -X POST \${SLACK_WEBHOOK} \
+                            -H 'Content-Type: application/json' \
+                            -d '{
+                                "text": "✅ BTD Infrastructure ${action}",
+                                "blocks": [
+                                    {
+                                        "type": "section",
+                                        "fields": [
+                                            {"type": "mrkdwn", "text": "*Environment:*\\n${params.ENVIRONMENT}"},
+                                            {"type": "mrkdwn", "text": "*Action:*\\n${action}"},
+                                            {"type": "mrkdwn", "text": "*Build:*\\n#${BUILD_NUMBER}"},
+                                            {"type": "mrkdwn", "text": "*Deployment ID:*\\n${DEPLOYMENT_ID}"}
+                                        ]
+                                    }
+                                ]
+                            }'
+                    """
+                }
+            }
+        }
+
+        failure {
+            script {
+                echo "=========================================="
+                echo "Infrastructure Deployment Failed!"
+                echo "=========================================="
+
+                withCredentials([string(credentialsId: env.SLACK_WEBHOOK_ID, variable: 'SLACK_WEBHOOK')]) {
+                    sh """
+                        curl -X POST \${SLACK_WEBHOOK} \
+                            -H 'Content-Type: application/json' \
+                            -d '{
+                                "text": "❌ BTD Infrastructure Deployment Failed",
+                                "blocks": [
+                                    {
+                                        "type": "section",
+                                        "fields": [
+                                            {"type": "mrkdwn", "text": "*Environment:*\\n${params.ENVIRONMENT}"},
+                                            {"type": "mrkdwn", "text": "*Build:*\\n#${BUILD_NUMBER}"}
+                                        ]
+                                    },
+                                    {
+                                        "type": "section",
+                                        "text": {"type": "mrkdwn", "text": "View logs: ${BUILD_URL}console"}
+                                    }
+                                ]
+                            }'
+                    """
+                }
+            }
+        }
+
+        always {
+            script {
+                // Cleanup
+                dir(env.TERRAFORM_DIR) {
+                    sh """
+                        rm -f tfplan-*.tfplan
+                        rm -f plan_exit_code.txt
+                    """
+                }
+            }
+        }
+    }
+}

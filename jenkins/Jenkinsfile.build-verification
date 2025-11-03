@@ -1,0 +1,385 @@
+#!/usr/bin/env groovy
+
+/**
+ * BTD Platform - Build Verification Pipeline
+ *
+ * Purpose: PR validation and continuous integration
+ * Use Case: Automated PR checks, branch builds, CI validation
+ *
+ * Triggers: GitHub PR webhooks, branch pushes
+ */
+
+pipeline {
+    agent any
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '100'))
+        timeout(time: 30, unit: 'MINUTES')
+        timestamps()
+        ansiColor('xterm')
+    }
+
+    environment {
+        BTD_APP_ROOT = '/root/projects/btd-app'
+        MICROSERVICES = 'btd-auth-service,btd-users-service,btd-matches-service,btd-messaging-service,btd-notification-service,btd-payment-service,btd-admin-service,btd-analytics-service,btd-ai-service,btd-job-processing-service,btd-location-service,btd-match-request-limits-service,btd-moderation-service,btd-permission-service,btd-travel-service,btd-video-call-service,btd-orchestrator,file-processing-service'
+
+        GITHUB_CREDENTIALS_ID = 'github-pat-btd'
+
+        // Build tracking
+        BUILD_ID = "${BUILD_NUMBER}-verify-${new Date().format('yyyyMMdd-HHmmss')}"
+    }
+
+    stages {
+        stage('Initialization') {
+            steps {
+                script {
+                    echo "=========================================="
+                    echo "BTD Build Verification"
+                    echo "=========================================="
+                    echo "Build ID: ${BUILD_ID}"
+                    echo "Branch: ${env.BRANCH_NAME ?: env.GIT_BRANCH ?: 'unknown'}"
+                    echo "PR: ${env.CHANGE_ID ?: 'N/A'}"
+                    echo "=========================================="
+
+                    // Set GitHub status to pending
+                    if (env.CHANGE_ID) {
+                        githubNotify status: 'PENDING',
+                                     description: 'Build verification in progress',
+                                     context: 'jenkins/build-verification'
+                    }
+                }
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                script {
+                    checkout scm
+                    env.GIT_COMMIT_HASH = sh(returnStdout: true, script: 'git rev-parse HEAD').trim()
+                    echo "Git Commit: ${env.GIT_COMMIT_HASH}"
+                }
+            }
+        }
+
+        stage('Dependency Check') {
+            steps {
+                script {
+                    echo "Checking for dependency issues..."
+                    sh """
+                        # Check for package.json in all services
+                        for service in ${env.MICROSERVICES//,/ }; do
+                            if [ ! -f "\${service}/package.json" ]; then
+                                echo "❌ Missing package.json in \${service}"
+                                exit 1
+                            fi
+                        done
+
+                        echo "✓ All services have package.json"
+                    """
+                }
+            }
+        }
+
+        stage('Build Services') {
+            steps {
+                script {
+                    echo "Building all services in parallel..."
+                    def services = env.MICROSERVICES.split(',')
+                    def buildStages = [:]
+
+                    services.each { serviceName ->
+                        def service = serviceName.trim()
+                        buildStages[service] = {
+                            stage("Build ${service}") {
+                                dir(service) {
+                                    try {
+                                        sh """
+                                            echo "Building ${service}..."
+
+                                            # Install dependencies
+                                            npm ci --prefer-offline --no-audit
+
+                                            # Build
+                                            npm run build
+
+                                            # Copy proto files if they exist
+                                            if [ -d "src/proto" ]; then
+                                                mkdir -p dist/src
+                                                cp -r src/proto dist/src/
+                                            fi
+
+                                            echo "✓ ${service} build successful"
+                                        """
+                                    } catch (Exception e) {
+                                        echo "❌ ${service} build failed: ${e.message}"
+                                        throw e
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    parallel buildStages
+                }
+            }
+        }
+
+        stage('Run Tests') {
+            parallel {
+                stage('Unit Tests') {
+                    steps {
+                        script {
+                            echo "Running unit tests..."
+                            def services = env.MICROSERVICES.split(',')
+                            def failedTests = []
+
+                            services.each { service ->
+                                dir(service.trim()) {
+                                    def result = sh(
+                                        script: 'npm run test:unit 2>&1',
+                                        returnStatus: true
+                                    )
+                                    if (result != 0) {
+                                        failedTests.add(service.trim())
+                                    }
+                                }
+                            }
+
+                            if (failedTests.size() > 0) {
+                                echo "⚠️  Unit tests failed in: ${failedTests.join(', ')}"
+                                // Don't fail the build, but mark unstable
+                                currentBuild.result = 'UNSTABLE'
+                            } else {
+                                echo "✓ All unit tests passed"
+                            }
+                        }
+                    }
+                }
+
+                stage('Lint') {
+                    steps {
+                        script {
+                            echo "Running ESLint..."
+                            def services = env.MICROSERVICES.split(',')
+                            def lintErrors = []
+
+                            services.each { service ->
+                                dir(service.trim()) {
+                                    def result = sh(
+                                        script: 'npm run lint 2>&1',
+                                        returnStatus: true
+                                    )
+                                    if (result != 0) {
+                                        lintErrors.add(service.trim())
+                                    }
+                                }
+                            }
+
+                            if (lintErrors.size() > 0) {
+                                echo "❌ Lint errors found in: ${lintErrors.join(', ')}"
+                                error("Lint check failed")
+                            } else {
+                                echo "✓ No lint errors found"
+                            }
+                        }
+                    }
+                }
+
+                stage('TypeScript Check') {
+                    steps {
+                        script {
+                            echo "Running TypeScript typecheck..."
+                            def services = env.MICROSERVICES.split(',')
+                            def typeErrors = []
+
+                            services.each { service ->
+                                dir(service.trim()) {
+                                    def result = sh(
+                                        script: 'npm run typecheck 2>&1',
+                                        returnStatus: true
+                                    )
+                                    if (result != 0) {
+                                        typeErrors.add(service.trim())
+                                    }
+                                }
+                            }
+
+                            if (typeErrors.size() > 0) {
+                                echo "❌ Type errors found in: ${typeErrors.join(', ')}"
+                                error("TypeScript check failed")
+                            } else {
+                                echo "✓ No type errors found"
+                            }
+                        }
+                    }
+                }
+
+                stage('Proto Validation') {
+                    steps {
+                        script {
+                            echo "Validating proto files..."
+                            sh """
+                                # Check proto files exist
+                                if [ ! -d "btd-proto" ]; then
+                                    echo "⚠️  btd-proto directory not found"
+                                    exit 0
+                                fi
+
+                                # Validate proto syntax (if protoc is installed)
+                                if command -v protoc &> /dev/null; then
+                                    find btd-proto -name "*.proto" -exec protoc --proto_path=btd-proto --syntax_only {} \\; || {
+                                        echo "❌ Proto validation failed"
+                                        exit 1
+                                    }
+                                    echo "✓ Proto files validated"
+                                else
+                                    echo "⚠️  protoc not installed, skipping proto validation"
+                                fi
+                            """
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Security Scan') {
+            steps {
+                script {
+                    echo "Running security audit..."
+                    sh """
+                        # Run npm audit for each service
+                        for service in ${env.MICROSERVICES//,/ }; do
+                            echo "Auditing \${service}..."
+                            cd \${service}
+                            npm audit --audit-level=moderate || echo "⚠️  Security issues found in \${service}"
+                            cd ..
+                        done
+                    """
+                }
+            }
+        }
+
+        stage('Build Report') {
+            steps {
+                script {
+                    echo "=========================================="
+                    echo "Build Verification Summary"
+                    echo "=========================================="
+                    echo "Branch: ${env.BRANCH_NAME ?: env.GIT_BRANCH}"
+                    echo "Commit: ${env.GIT_COMMIT_HASH}"
+                    echo "Build Status: ${currentBuild.result ?: 'SUCCESS'}"
+                    echo "=========================================="
+
+                    // Generate detailed build report
+                    sh """
+                        cat > build-report.txt << 'EOF'
+BTD Build Verification Report
+==============================
+Build ID: ${BUILD_ID}
+Branch: ${env.BRANCH_NAME ?: env.GIT_BRANCH}
+Commit: ${env.GIT_COMMIT_HASH}
+Status: ${currentBuild.result ?: 'SUCCESS'}
+Date: ${new Date()}
+
+Services Built:
+${env.MICROSERVICES.split(',').collect { "  - ${it.trim()}" }.join('\n')}
+
+Build Duration: ${currentBuild.durationString}
+==============================
+EOF
+                        cat build-report.txt
+                    """
+
+                    archiveArtifacts artifacts: 'build-report.txt'
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                echo "✅ Build verification successful"
+
+                // Update GitHub PR status
+                if (env.CHANGE_ID) {
+                    githubNotify status: 'SUCCESS',
+                                 description: 'All checks passed',
+                                 context: 'jenkins/build-verification'
+
+                    // Post comment on PR
+                    def comment = """
+✅ Build verification successful!
+
+**Build Details:**
+- Build #${BUILD_NUMBER}
+- Commit: `${env.GIT_COMMIT_HASH?.take(8)}`
+- Duration: ${currentBuild.durationString}
+
+**Checks:**
+- ✓ Build completed
+- ✓ Tests passed
+- ✓ Lint checks passed
+- ✓ Type checks passed
+
+[View full build log](${BUILD_URL}console)
+"""
+                    // Would post to GitHub PR via API
+                    echo "PR Comment:\n${comment}"
+                }
+            }
+        }
+
+        failure {
+            script {
+                echo "❌ Build verification failed"
+
+                // Update GitHub PR status
+                if (env.CHANGE_ID) {
+                    githubNotify status: 'FAILURE',
+                                 description: 'Build verification failed',
+                                 context: 'jenkins/build-verification'
+
+                    def comment = """
+❌ Build verification failed
+
+**Build Details:**
+- Build #${BUILD_NUMBER}
+- Commit: `${env.GIT_COMMIT_HASH?.take(8)}`
+
+**Action Required:**
+Please review the build logs and fix the issues.
+
+[View full build log](${BUILD_URL}console)
+"""
+                    echo "PR Comment:\n${comment}"
+                }
+            }
+        }
+
+        unstable {
+            script {
+                echo "⚠️  Build verification completed with warnings"
+
+                if (env.CHANGE_ID) {
+                    githubNotify status: 'SUCCESS',
+                                 description: 'Build completed with warnings',
+                                 context: 'jenkins/build-verification'
+                }
+            }
+        }
+
+        always {
+            script {
+                // Cleanup
+                sh """
+                    # Clean up node_modules to save space
+                    # (commented out by default to speed up future builds)
+                    # find . -name "node_modules" -type d -prune -exec rm -rf {} \\;
+
+                    echo "Build verification complete"
+                """
+            }
+        }
+    }
+}

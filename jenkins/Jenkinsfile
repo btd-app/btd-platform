@@ -1,0 +1,784 @@
+#!/usr/bin/env groovy
+
+/**
+ * BTD Platform - Main Deployment Pipeline
+ *
+ * Orchestrates complete deployment: build, test, infrastructure, and application deployment
+ * Supports: development, staging, production environments
+ * Integrates: GitHub, Terraform, Ansible, Proxmox, Consul
+ *
+ * Network: 10.27.27.0/23
+ * Jenkins Server: 10.27.27.251
+ * Proxmox API: 10.27.27.192
+ * Consul Backend: 10.27.27.27:8500
+ */
+
+pipeline {
+    agent any
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '30', artifactNumToKeepStr: '5'))
+        disableConcurrentBuilds()
+        timeout(time: 60, unit: 'MINUTES')
+        timestamps()
+        ansiColor('xterm')
+    }
+
+    parameters {
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['development', 'staging', 'production'],
+            description: 'Target deployment environment'
+        )
+        booleanParam(
+            name: 'SKIP_TESTS',
+            defaultValue: false,
+            description: 'Skip test execution (not recommended for production)'
+        )
+        booleanParam(
+            name: 'INFRASTRUCTURE_ONLY',
+            defaultValue: false,
+            description: 'Deploy infrastructure changes only (Terraform)'
+        )
+        booleanParam(
+            name: 'APPLICATION_ONLY',
+            defaultValue: false,
+            description: 'Deploy application only (Ansible, skip Terraform)'
+        )
+        booleanParam(
+            name: 'FORCE_REBUILD',
+            defaultValue: false,
+            description: 'Force rebuild all services (ignore cache)'
+        )
+        string(
+            name: 'SERVICES_TO_DEPLOY',
+            defaultValue: 'all',
+            description: 'Comma-separated service names or "all" (e.g., auth-service,users-service)'
+        )
+    }
+
+    environment {
+        // Jenkins configuration
+        JENKINS_HOME = '/var/lib/jenkins'
+        WORKSPACE_DIR = "${WORKSPACE}"
+
+        // Network and infrastructure
+        PROXMOX_API_URL = 'https://10.27.27.192:8006/api2/json'
+        CONSUL_HTTP_ADDR = '10.27.27.27:8500'
+        TERRAFORM_STATE_BACKEND = 'consul'
+
+        // BTD application configuration
+        BTD_APP_ROOT = '/root/projects/btd-app'
+        TERRAFORM_DIR = "${BTD_APP_ROOT}/terraform"
+        ANSIBLE_DIR = "${BTD_APP_ROOT}/btd-ansible"
+        JENKINS_DIR = "${BTD_APP_ROOT}/jenkins"
+
+        // Service configuration
+        TOTAL_SERVICES = '18'
+        MICROSERVICES = 'btd-auth-service,btd-users-service,btd-matches-service,btd-messaging-service,btd-notification-service,btd-payment-service,btd-admin-service,btd-analytics-service,btd-ai-service,btd-job-processing-service,btd-location-service,btd-match-request-limits-service,btd-moderation-service,btd-permission-service,btd-travel-service,btd-video-call-service,btd-orchestrator,file-processing-service'
+
+        // Credentials (stored in Jenkins Credential Store)
+        GITHUB_CREDENTIALS_ID = 'github-pat-btd'
+        PROXMOX_CREDENTIALS_ID = 'proxmox-api-token'
+        ANSIBLE_SSH_KEY_ID = 'ansible-ssh-private-key'
+        CONSUL_TOKEN_ID = 'consul-acl-token'
+        SLACK_WEBHOOK_ID = 'slack-webhook-url'
+
+        // Deployment tracking
+        DEPLOYMENT_ID = "${BUILD_NUMBER}-${ENVIRONMENT}-${new Date().format('yyyyMMdd-HHmmss')}"
+        ROLLBACK_STATE_FILE = "${WORKSPACE}/rollback-state-${DEPLOYMENT_ID}.json"
+    }
+
+    stages {
+        stage('Initialization') {
+            steps {
+                script {
+                    echo "=========================================="
+                    echo "BTD Platform Deployment Pipeline"
+                    echo "=========================================="
+                    echo "Deployment ID: ${DEPLOYMENT_ID}"
+                    echo "Environment: ${params.ENVIRONMENT}"
+                    echo "Branch: ${env.BRANCH_NAME ?: 'main'}"
+                    echo "Build Number: ${BUILD_NUMBER}"
+                    echo "=========================================="
+
+                    // Determine environment from branch if not specified
+                    if (!params.ENVIRONMENT) {
+                        def branch = env.BRANCH_NAME ?: 'main'
+                        if (branch == 'main' || branch == 'master') {
+                            env.TARGET_ENV = 'production'
+                        } else if (branch == 'staging') {
+                            env.TARGET_ENV = 'staging'
+                        } else {
+                            env.TARGET_ENV = 'development'
+                        }
+                    } else {
+                        env.TARGET_ENV = params.ENVIRONMENT
+                    }
+
+                    echo "Target Environment: ${env.TARGET_ENV}"
+
+                    // Save current state for potential rollback
+                    sh """
+                        echo '{"deployment_id": "${DEPLOYMENT_ID}", "environment": "${env.TARGET_ENV}", "timestamp": "${new Date()}", "build_number": "${BUILD_NUMBER}"}' > ${ROLLBACK_STATE_FILE}
+                    """
+                }
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                script {
+                    echo "Checking out code from GitHub..."
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: "*/${env.BRANCH_NAME ?: 'main'}"]],
+                        userRemoteConfigs: [[
+                            url: 'https://github.com/btd-app/btd-app.git',
+                            credentialsId: env.GITHUB_CREDENTIALS_ID
+                        ]],
+                        extensions: [
+                            [$class: 'CleanBeforeCheckout'],
+                            [$class: 'SubmoduleOption',
+                             disableSubmodules: false,
+                             recursiveSubmodules: true,
+                             trackingSubmodules: true]
+                        ]
+                    ])
+
+                    // Store commit hash for tracking
+                    env.GIT_COMMIT_HASH = sh(returnStdout: true, script: 'git rev-parse HEAD').trim()
+                    echo "Git Commit: ${env.GIT_COMMIT_HASH}"
+                }
+            }
+        }
+
+        stage('Pre-Deployment Validation') {
+            steps {
+                script {
+                    echo "Running pre-deployment validation checks..."
+                    sh """
+                        chmod +x ${JENKINS_DIR}/scripts/pre-deployment-checks.sh
+                        ${JENKINS_DIR}/scripts/pre-deployment-checks.sh ${env.TARGET_ENV}
+                    """
+                }
+            }
+        }
+
+        stage('Build & Test Services') {
+            when {
+                expression { params.INFRASTRUCTURE_ONLY != true }
+            }
+            parallel {
+                stage('Build Auth Service') {
+                    steps {
+                        script {
+                            buildService('btd-auth-service')
+                        }
+                    }
+                }
+                stage('Build Users Service') {
+                    steps {
+                        script {
+                            buildService('btd-users-service')
+                        }
+                    }
+                }
+                stage('Build Matches Service') {
+                    steps {
+                        script {
+                            buildService('btd-matches-service')
+                        }
+                    }
+                }
+                stage('Build Messaging Service') {
+                    steps {
+                        script {
+                            buildService('btd-messaging-service')
+                        }
+                    }
+                }
+                stage('Build Notification Service') {
+                    steps {
+                        script {
+                            buildService('btd-notification-service')
+                        }
+                    }
+                }
+                stage('Build Payment Service') {
+                    steps {
+                        script {
+                            buildService('btd-payment-service')
+                        }
+                    }
+                }
+                stage('Build Admin Service') {
+                    steps {
+                        script {
+                            buildService('btd-admin-service')
+                        }
+                    }
+                }
+                stage('Build Analytics Service') {
+                    steps {
+                        script {
+                            buildService('btd-analytics-service')
+                        }
+                    }
+                }
+                stage('Build AI Service') {
+                    steps {
+                        script {
+                            buildService('btd-ai-service')
+                        }
+                    }
+                }
+                stage('Build Job Processing Service') {
+                    steps {
+                        script {
+                            buildService('btd-job-processing-service')
+                        }
+                    }
+                }
+                stage('Build Location Service') {
+                    steps {
+                        script {
+                            buildService('btd-location-service')
+                        }
+                    }
+                }
+                stage('Build Match Request Limits Service') {
+                    steps {
+                        script {
+                            buildService('btd-match-request-limits-service')
+                        }
+                    }
+                }
+                stage('Build Moderation Service') {
+                    steps {
+                        script {
+                            buildService('btd-moderation-service')
+                        }
+                    }
+                }
+                stage('Build Permission Service') {
+                    steps {
+                        script {
+                            buildService('btd-permission-service')
+                        }
+                    }
+                }
+                stage('Build Travel Service') {
+                    steps {
+                        script {
+                            buildService('btd-travel-service')
+                        }
+                    }
+                }
+                stage('Build Video Call Service') {
+                    steps {
+                        script {
+                            buildService('btd-video-call-service')
+                        }
+                    }
+                }
+                stage('Build Orchestrator') {
+                    steps {
+                        script {
+                            buildService('btd-orchestrator')
+                        }
+                    }
+                }
+                stage('Build File Processing Service') {
+                    steps {
+                        script {
+                            buildService('file-processing-service')
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Run Tests') {
+            when {
+                expression {
+                    params.SKIP_TESTS != true && params.INFRASTRUCTURE_ONLY != true
+                }
+            }
+            parallel {
+                stage('Unit Tests') {
+                    steps {
+                        script {
+                            echo "Running unit tests..."
+                            def services = env.MICROSERVICES.split(',')
+                            services.each { service ->
+                                if (shouldDeployService(service.trim())) {
+                                    dir("${service.trim()}") {
+                                        sh 'npm run test:unit || true'
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                stage('Integration Tests') {
+                    steps {
+                        script {
+                            echo "Running integration tests..."
+                            sh 'npm run test:integration || true'
+                        }
+                    }
+                }
+                stage('Lint & Typecheck') {
+                    steps {
+                        script {
+                            echo "Running lint and typecheck..."
+                            def services = env.MICROSERVICES.split(',')
+                            services.each { service ->
+                                if (shouldDeployService(service.trim())) {
+                                    dir("${service.trim()}") {
+                                        sh 'npm run lint || true'
+                                        sh 'npm run typecheck || true'
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Infrastructure Provisioning (Terraform)') {
+            when {
+                expression { params.APPLICATION_ONLY != true }
+            }
+            stages {
+                stage('Terraform Init') {
+                    steps {
+                        script {
+                            echo "Initializing Terraform..."
+                            dir(env.TERRAFORM_DIR) {
+                                withCredentials([
+                                    string(credentialsId: env.CONSUL_TOKEN_ID, variable: 'CONSUL_HTTP_TOKEN')
+                                ]) {
+                                    sh """
+                                        terraform init \
+                                            -backend=true \
+                                            -backend-config="address=${env.CONSUL_HTTP_ADDR}" \
+                                            -backend-config="path=terraform/btd-${env.TARGET_ENV}/state"
+                                    """
+                                }
+                            }
+                        }
+                    }
+                }
+
+                stage('Terraform Validate') {
+                    steps {
+                        script {
+                            echo "Validating Terraform configuration..."
+                            dir(env.TERRAFORM_DIR) {
+                                sh 'terraform validate'
+                            }
+                        }
+                    }
+                }
+
+                stage('Terraform Plan') {
+                    steps {
+                        script {
+                            echo "Creating Terraform execution plan..."
+                            dir(env.TERRAFORM_DIR) {
+                                withCredentials([
+                                    string(credentialsId: env.PROXMOX_CREDENTIALS_ID, variable: 'PROXMOX_TOKEN'),
+                                    string(credentialsId: env.CONSUL_TOKEN_ID, variable: 'CONSUL_HTTP_TOKEN')
+                                ]) {
+                                    sh """
+                                        terraform plan \
+                                            -var-file="environments/${env.TARGET_ENV}.tfvars" \
+                                            -out=tfplan-${DEPLOYMENT_ID}.tfplan \
+                                            -detailed-exitcode || EXIT_CODE=\$?
+
+                                        # Exit code 0: no changes, 1: error, 2: changes present
+                                        if [ "\${EXIT_CODE:-0}" -eq "1" ]; then
+                                            echo "Terraform plan failed!"
+                                            exit 1
+                                        elif [ "\${EXIT_CODE:-0}" -eq "2" ]; then
+                                            echo "Infrastructure changes detected"
+                                            echo "2" > plan_exit_code.txt
+                                        else
+                                            echo "No infrastructure changes"
+                                            echo "0" > plan_exit_code.txt
+                                        fi
+                                    """
+
+                                    // Display plan
+                                    sh "terraform show tfplan-${DEPLOYMENT_ID}.tfplan"
+                                }
+                            }
+                        }
+                    }
+                }
+
+                stage('Terraform Apply Approval') {
+                    when {
+                        expression {
+                            env.TARGET_ENV == 'production' &&
+                            readFile("${env.TERRAFORM_DIR}/plan_exit_code.txt").trim() == '2'
+                        }
+                    }
+                    steps {
+                        script {
+                            echo "Production infrastructure changes require manual approval"
+                            timeout(time: 30, unit: 'MINUTES') {
+                                input message: 'Apply Terraform changes to production infrastructure?',
+                                      ok: 'Deploy',
+                                      submitter: 'admin,devops-team'
+                            }
+                        }
+                    }
+                }
+
+                stage('Terraform Apply') {
+                    when {
+                        expression {
+                            def planExitCode = readFile("${env.TERRAFORM_DIR}/plan_exit_code.txt").trim()
+                            return planExitCode == '2'
+                        }
+                    }
+                    steps {
+                        script {
+                            echo "Applying Terraform changes..."
+                            dir(env.TERRAFORM_DIR) {
+                                withCredentials([
+                                    string(credentialsId: env.PROXMOX_CREDENTIALS_ID, variable: 'PROXMOX_TOKEN'),
+                                    string(credentialsId: env.CONSUL_TOKEN_ID, variable: 'CONSUL_HTTP_TOKEN')
+                                ]) {
+                                    sh """
+                                        terraform apply \
+                                            -auto-approve \
+                                            tfplan-${DEPLOYMENT_ID}.tfplan
+                                    """
+                                }
+                            }
+                        }
+                    }
+                }
+
+                stage('Export Ansible Inventory') {
+                    steps {
+                        script {
+                            echo "Generating Ansible inventory from Terraform outputs..."
+                            dir(env.TERRAFORM_DIR) {
+                                sh """
+                                    terraform output -json > terraform-outputs.json
+
+                                    # Generate Ansible inventory from Terraform outputs
+                                    python3 ${JENKINS_DIR}/scripts/generate-ansible-inventory.py \
+                                        terraform-outputs.json \
+                                        ${ANSIBLE_DIR}/inventories/${env.TARGET_ENV}/hosts.yml
+                                """
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Application Deployment (Ansible)') {
+            when {
+                expression { params.INFRASTRUCTURE_ONLY != true }
+            }
+            stages {
+                stage('Ansible Syntax Check') {
+                    steps {
+                        script {
+                            echo "Validating Ansible playbooks..."
+                            dir(env.ANSIBLE_DIR) {
+                                sh """
+                                    ansible-playbook \
+                                        -i inventories/${env.TARGET_ENV}/hosts.yml \
+                                        playbooks/deploy-services.yml \
+                                        --syntax-check
+                                """
+                            }
+                        }
+                    }
+                }
+
+                stage('Deploy Application Approval') {
+                    when {
+                        expression { env.TARGET_ENV == 'production' }
+                    }
+                    steps {
+                        script {
+                            echo "Production application deployment requires manual approval"
+                            timeout(time: 15, unit: 'MINUTES') {
+                                input message: 'Deploy application to production?',
+                                      ok: 'Deploy',
+                                      submitter: 'admin,devops-team'
+                            }
+                        }
+                    }
+                }
+
+                stage('Deploy Services with Ansible') {
+                    steps {
+                        script {
+                            echo "Deploying BTD services to LXC containers..."
+                            dir(env.ANSIBLE_DIR) {
+                                withCredentials([
+                                    sshUserPrivateKey(
+                                        credentialsId: env.ANSIBLE_SSH_KEY_ID,
+                                        keyFileVariable: 'SSH_KEY_FILE',
+                                        usernameVariable: 'SSH_USER'
+                                    )
+                                ]) {
+                                    def extraVars = [
+                                        "deployment_id=${DEPLOYMENT_ID}",
+                                        "environment=${env.TARGET_ENV}",
+                                        "git_commit=${env.GIT_COMMIT_HASH}"
+                                    ]
+
+                                    if (params.SERVICES_TO_DEPLOY && params.SERVICES_TO_DEPLOY != 'all') {
+                                        extraVars.add("services_filter=${params.SERVICES_TO_DEPLOY}")
+                                    }
+
+                                    sh """
+                                        ansible-playbook \
+                                            -i inventories/${env.TARGET_ENV}/hosts.yml \
+                                            playbooks/deploy-services.yml \
+                                            --private-key=\${SSH_KEY_FILE} \
+                                            --extra-vars "${extraVars.join(' ')}" \
+                                            --diff \
+                                            -v
+                                    """
+                                }
+                            }
+                        }
+                    }
+                }
+
+                stage('Database Migrations') {
+                    steps {
+                        script {
+                            echo "Running database migrations..."
+                            dir(env.ANSIBLE_DIR) {
+                                withCredentials([
+                                    sshUserPrivateKey(
+                                        credentialsId: env.ANSIBLE_SSH_KEY_ID,
+                                        keyFileVariable: 'SSH_KEY_FILE'
+                                    )
+                                ]) {
+                                    sh """
+                                        ansible-playbook \
+                                            -i inventories/${env.TARGET_ENV}/hosts.yml \
+                                            playbooks/run-migrations.yml \
+                                            --private-key=\${SSH_KEY_FILE} \
+                                            --extra-vars "environment=${env.TARGET_ENV}" \
+                                            -v
+                                    """
+                                }
+                            }
+                        }
+                    }
+                }
+
+                stage('Service Health Wait') {
+                    steps {
+                        script {
+                            echo "Waiting for services to be ready..."
+                            sleep(time: 30, unit: 'SECONDS')
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Post-Deployment Verification') {
+            when {
+                expression { params.INFRASTRUCTURE_ONLY != true }
+            }
+            steps {
+                script {
+                    echo "Running post-deployment health checks..."
+                    sh """
+                        chmod +x ${JENKINS_DIR}/scripts/post-deployment-health-check.sh
+                        ${JENKINS_DIR}/scripts/post-deployment-health-check.sh ${env.TARGET_ENV}
+                    """
+                }
+            }
+        }
+
+        stage('Smoke Tests') {
+            when {
+                expression {
+                    params.INFRASTRUCTURE_ONLY != true && env.TARGET_ENV == 'production'
+                }
+            }
+            steps {
+                script {
+                    echo "Running smoke tests..."
+                    sh """
+                        chmod +x ${JENKINS_DIR}/scripts/smoke-tests.sh
+                        ${JENKINS_DIR}/scripts/smoke-tests.sh ${env.TARGET_ENV}
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                echo "=========================================="
+                echo "Deployment Successful!"
+                echo "=========================================="
+                echo "Deployment ID: ${DEPLOYMENT_ID}"
+                echo "Environment: ${env.TARGET_ENV}"
+                echo "Git Commit: ${env.GIT_COMMIT_HASH}"
+                echo "=========================================="
+
+                // Send success notification
+                withCredentials([string(credentialsId: env.SLACK_WEBHOOK_ID, variable: 'SLACK_WEBHOOK')]) {
+                    sh """
+                        curl -X POST \${SLACK_WEBHOOK} \
+                            -H 'Content-Type: application/json' \
+                            -d '{
+                                "text": "✅ BTD Deployment Successful",
+                                "blocks": [
+                                    {
+                                        "type": "header",
+                                        "text": {
+                                            "type": "plain_text",
+                                            "text": "✅ BTD Platform Deployment Successful"
+                                        }
+                                    },
+                                    {
+                                        "type": "section",
+                                        "fields": [
+                                            {"type": "mrkdwn", "text": "*Environment:*\\n${env.TARGET_ENV}"},
+                                            {"type": "mrkdwn", "text": "*Build:*\\n#${BUILD_NUMBER}"},
+                                            {"type": "mrkdwn", "text": "*Deployment ID:*\\n${DEPLOYMENT_ID}"},
+                                            {"type": "mrkdwn", "text": "*Commit:*\\n${env.GIT_COMMIT_HASH?.take(8)}"}
+                                        ]
+                                    }
+                                ]
+                            }'
+                    """
+                }
+            }
+        }
+
+        failure {
+            script {
+                echo "=========================================="
+                echo "Deployment Failed!"
+                echo "=========================================="
+                echo "Initiating automatic rollback..."
+
+                // Attempt rollback
+                sh """
+                    chmod +x ${JENKINS_DIR}/scripts/rollback-deployment.sh
+                    ${JENKINS_DIR}/scripts/rollback-deployment.sh ${DEPLOYMENT_ID} ${env.TARGET_ENV} || echo "Rollback failed - manual intervention required"
+                """
+
+                // Send failure notification
+                withCredentials([string(credentialsId: env.SLACK_WEBHOOK_ID, variable: 'SLACK_WEBHOOK')]) {
+                    sh """
+                        curl -X POST \${SLACK_WEBHOOK} \
+                            -H 'Content-Type: application/json' \
+                            -d '{
+                                "text": "❌ BTD Deployment Failed",
+                                "blocks": [
+                                    {
+                                        "type": "header",
+                                        "text": {
+                                            "type": "plain_text",
+                                            "text": "❌ BTD Platform Deployment Failed"
+                                        }
+                                    },
+                                    {
+                                        "type": "section",
+                                        "fields": [
+                                            {"type": "mrkdwn", "text": "*Environment:*\\n${env.TARGET_ENV}"},
+                                            {"type": "mrkdwn", "text": "*Build:*\\n#${BUILD_NUMBER}"},
+                                            {"type": "mrkdwn", "text": "*Deployment ID:*\\n${DEPLOYMENT_ID}"},
+                                            {"type": "mrkdwn", "text": "*Action:*\\nAutomatic rollback initiated"}
+                                        ]
+                                    },
+                                    {
+                                        "type": "section",
+                                        "text": {
+                                            "type": "mrkdwn",
+                                            "text": "View logs: ${BUILD_URL}console"
+                                        }
+                                    }
+                                ]
+                            }'
+                    """
+                }
+            }
+        }
+
+        always {
+            script {
+                // Archive artifacts
+                archiveArtifacts artifacts: '**/build.log, **/terraform-outputs.json, **/rollback-state-*.json', allowEmptyArchive: true
+
+                // Cleanup
+                sh """
+                    # Clean up temporary files
+                    rm -f ${env.TERRAFORM_DIR}/tfplan-*.tfplan
+                    rm -f ${env.TERRAFORM_DIR}/plan_exit_code.txt
+                """
+            }
+        }
+    }
+}
+
+/**
+ * Helper function to build individual services
+ */
+def buildService(String serviceName) {
+    echo "Building ${serviceName}..."
+
+    if (!shouldDeployService(serviceName)) {
+        echo "Skipping ${serviceName} (not in deployment filter)"
+        return
+    }
+
+    dir(serviceName) {
+        try {
+            sh """
+                # Install dependencies
+                npm ci ${params.FORCE_REBUILD ? '--force' : ''}
+
+                # Build service
+                npm run build
+
+                # Copy proto files if they exist
+                if [ -d "src/proto" ]; then
+                    mkdir -p dist/src
+                    cp -r src/proto dist/src/
+                fi
+            """
+            echo "✓ ${serviceName} built successfully"
+        } catch (Exception e) {
+            echo "✗ ${serviceName} build failed: ${e.message}"
+            throw e
+        }
+    }
+}
+
+/**
+ * Helper function to determine if service should be deployed
+ */
+def shouldDeployService(String serviceName) {
+    if (params.SERVICES_TO_DEPLOY == 'all') {
+        return true
+    }
+
+    def servicesToDeploy = params.SERVICES_TO_DEPLOY.split(',').collect { it.trim() }
+    return servicesToDeploy.contains(serviceName)
+}

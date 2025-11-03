@@ -1,0 +1,243 @@
+{
+  "github_webhook_configuration": {
+    "description": "GitHub webhook configuration for BTD platform CI/CD",
+    "webhook_url": "http://10.27.27.251:8080/github-webhook/",
+    "repository": "btd-app/btd-app",
+    "events": [
+      "push",
+      "pull_request",
+      "pull_request_review",
+      "create",
+      "delete"
+    ],
+    "content_type": "application/json",
+    "ssl_verification": true,
+    "active": true
+  },
+
+  "setup_instructions": {
+    "step_1": {
+      "description": "Navigate to GitHub repository settings",
+      "url": "https://github.com/btd-app/btd-app/settings/hooks"
+    },
+    "step_2": {
+      "description": "Click 'Add webhook'",
+      "action": "Click the 'Add webhook' button"
+    },
+    "step_3": {
+      "description": "Configure webhook",
+      "fields": {
+        "payload_url": "http://10.27.27.251:8080/github-webhook/",
+        "content_type": "application/json",
+        "secret": "Use a secure random string (store in Jenkins credentials)",
+        "ssl_verification": "Enable SSL verification",
+        "events": "Select: Pushes, Pull requests"
+      }
+    },
+    "step_4": {
+      "description": "Save webhook",
+      "action": "Click 'Add webhook' to save"
+    },
+    "step_5": {
+      "description": "Verify webhook",
+      "action": "Check 'Recent Deliveries' tab for successful ping event"
+    }
+  },
+
+  "jenkins_configuration": {
+    "required_plugins": [
+      "github",
+      "github-branch-source",
+      "pipeline-github",
+      "github-pullrequest"
+    ],
+    "system_configuration": {
+      "github_servers": [
+        {
+          "name": "GitHub",
+          "api_url": "https://api.github.com",
+          "credentials_id": "github-pat-btd",
+          "manage_hooks": true,
+          "cache_connection": true
+        }
+      ]
+    },
+    "job_configuration": {
+      "build_triggers": [
+        "GitHub hook trigger for GITScm polling"
+      ],
+      "branch_sources": [
+        {
+          "source": "GitHub",
+          "repo_owner": "btd-app",
+          "repository": "btd-app",
+          "credentials_id": "github-pat-btd",
+          "behaviors": [
+            "Discover branches",
+            "Discover pull requests from origin",
+            "Discover pull requests from forks"
+          ]
+        }
+      ]
+    }
+  },
+
+  "webhook_events_mapping": {
+    "push": {
+      "trigger": "Build main deployment pipeline",
+      "branches": ["main", "staging", "development"],
+      "pipeline": "btd-platform/main-deployment"
+    },
+    "pull_request": {
+      "trigger": "Build verification pipeline",
+      "actions": ["opened", "synchronize", "reopened"],
+      "pipeline": "btd-platform/build-verification"
+    },
+    "pull_request_review": {
+      "trigger": "Update PR status",
+      "actions": ["submitted"],
+      "pipeline": "btd-platform/build-verification"
+    },
+    "create": {
+      "trigger": "New branch created",
+      "ref_type": "branch",
+      "action": "Scan repository for new branches"
+    },
+    "delete": {
+      "trigger": "Branch deleted",
+      "ref_type": "branch",
+      "action": "Remove orphaned build jobs"
+    }
+  },
+
+  "deployment_strategy": {
+    "main_branch": {
+      "environment": "production",
+      "approval_required": true,
+      "auto_deploy": false,
+      "notification": "slack"
+    },
+    "staging_branch": {
+      "environment": "staging",
+      "approval_required": false,
+      "auto_deploy": true,
+      "notification": "slack"
+    },
+    "development_branch": {
+      "environment": "development",
+      "approval_required": false,
+      "auto_deploy": true,
+      "notification": "email"
+    },
+    "feature_branches": {
+      "environment": "none",
+      "approval_required": false,
+      "auto_deploy": false,
+      "build_only": true,
+      "notification": "github_status"
+    }
+  },
+
+  "github_status_checks": {
+    "required_checks": [
+      "jenkins/build-verification",
+      "jenkins/lint-check",
+      "jenkins/test-suite"
+    ],
+    "status_contexts": {
+      "pending": "Build in progress...",
+      "success": "All checks passed",
+      "failure": "Build failed - please review logs",
+      "error": "Build error - contact DevOps team"
+    }
+  },
+
+  "security_configuration": {
+    "webhook_secret": {
+      "description": "Shared secret to verify webhook authenticity",
+      "jenkins_credential_id": "github-webhook-secret",
+      "generation_command": "openssl rand -hex 32"
+    },
+    "ip_whitelist": {
+      "description": "GitHub webhook IPs (for firewall rules)",
+      "ips": [
+        "192.30.252.0/22",
+        "185.199.108.0/22",
+        "140.82.112.0/20",
+        "143.55.64.0/20"
+      ],
+      "source": "https://api.github.com/meta"
+    },
+    "authentication": {
+      "method": "GitHub Personal Access Token",
+      "credential_id": "github-pat-btd",
+      "required_scopes": ["repo", "admin:repo_hook"]
+    }
+  },
+
+  "troubleshooting": {
+    "webhook_not_triggering": {
+      "checks": [
+        "Verify webhook is active in GitHub settings",
+        "Check Recent Deliveries for error responses",
+        "Ensure Jenkins is accessible from GitHub (not behind firewall)",
+        "Verify webhook URL is correct: http://10.27.27.251:8080/github-webhook/",
+        "Check Jenkins system log for webhook processing errors",
+        "Confirm GitHub plugin is installed and configured"
+      ]
+    },
+    "build_not_starting": {
+      "checks": [
+        "Verify job is configured with 'GitHub hook trigger for GITScm polling'",
+        "Check Jenkins system log for errors",
+        "Ensure branch matches job configuration",
+        "Verify credentials are valid",
+        "Check if job is disabled",
+        "Review job build history for errors"
+      ]
+    },
+    "authentication_errors": {
+      "checks": [
+        "Verify GitHub PAT is valid and not expired",
+        "Confirm PAT has required scopes",
+        "Check credential ID matches job configuration",
+        "Test PAT with GitHub API: curl -H 'Authorization: token TOKEN' https://api.github.com/user"
+      ]
+    }
+  },
+
+  "testing_webhook": {
+    "manual_trigger": {
+      "description": "Manually trigger webhook for testing",
+      "command": "curl -X POST -H 'Content-Type: application/json' -d '{\"ref\":\"refs/heads/main\",\"repository\":{\"full_name\":\"btd-app/btd-app\"}}' http://10.27.27.251:8080/github-webhook/"
+    },
+    "github_delivery_test": {
+      "description": "Test webhook from GitHub",
+      "steps": [
+        "Go to repository Settings > Webhooks",
+        "Click on the webhook URL",
+        "Scroll to 'Recent Deliveries'",
+        "Click 'Redeliver' on any past delivery",
+        "Check response is 200 OK"
+      ]
+    }
+  },
+
+  "monitoring": {
+    "webhook_logs": {
+      "jenkins_log": "/var/log/jenkins/jenkins.log",
+      "search_pattern": "GitHub webhook",
+      "command": "tail -f /var/log/jenkins/jenkins.log | grep -i webhook"
+    },
+    "github_deliveries": {
+      "location": "Repository Settings > Webhooks > Recent Deliveries",
+      "check_frequency": "After each push/PR",
+      "expected_response": "200 OK"
+    },
+    "metrics": {
+      "success_rate": "Track successful vs failed webhook deliveries",
+      "response_time": "Monitor Jenkins webhook processing time",
+      "build_trigger_rate": "Track builds triggered by webhooks vs manual"
+    }
+  }
+}

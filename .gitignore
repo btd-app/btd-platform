@@ -20,3 +20,23 @@ Thumbs.db
 *.tmp
 *.bak
 *.log
+
+# Terraform
+**/.terraform/
+**/.terraform.lock.hcl
+**/terraform.tfstate
+**/terraform.tfstate.*
+**/terraform.tfstate.backup
+**/.terraform.tfstate.lock.info
+**/crash.log
+**/override.tf
+**/override.tf.json
+**/*_override.tf
+**/*_override.tf.json
+
+# Jenkins
+**/secrets/
+**/initialAdminPassword
+**/identity.key*
+**/secret.key*
+**/credentials.xml

@@ -1,0 +1,1513 @@
+# BTD Application Infrastructure - Main Configuration
+# Manages all 24 existing LXC containers for the BTD platform
+# Updated to match ACTUAL infrastructure as deployed
+
+terraform {
+  required_version = ">= 1.5.0"
+}
+
+# =========================================================================
+# INFRASTRUCTURE SERVICES (10.27.27.70-75, VMIDs 300-305)
+# =========================================================================
+
+# PostgreSQL Primary Database
+resource "proxmox_virtual_environment_container" "postgres" {
+  node_name   = "pveserver2"
+  vm_id       = 300
+  description = "BTD PostgreSQL Primary Database"
+  tags        = ["infrastructure", "database", "critical"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = var.infrastructure_container_specs.postgres.cores
+  }
+
+  memory {
+    dedicated = var.infrastructure_container_specs.postgres.memory
+    swap      = var.infrastructure_container_specs.postgres.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_databases
+    size         = parseint(trimspace(replace(var.infrastructure_container_specs.postgres.disk, "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-postgres-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.70/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 1
+    up_delay   = 10
+    down_delay = 5
+  }
+}
+
+# Redis Primary Cache
+resource "proxmox_virtual_environment_container" "redis" {
+  node_name   = "pves3"
+  vm_id       = 301
+  description = "BTD Redis Primary Cache"
+  tags        = ["infrastructure", "cache", "critical"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = var.infrastructure_container_specs.redis.cores
+  }
+
+  memory {
+    dedicated = var.infrastructure_container_specs.redis.memory
+    swap      = var.infrastructure_container_specs.redis.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_cache
+    size         = parseint(trimspace(replace(var.infrastructure_container_specs.redis.disk, "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-redis-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.71/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 1
+    up_delay   = 10
+    down_delay = 5
+  }
+}
+
+# MinIO Object Storage
+resource "proxmox_virtual_environment_container" "minio" {
+  node_name   = "pveserver4"
+  vm_id       = 302
+  description = "BTD MinIO Object Storage"
+  tags        = ["infrastructure", "storage", "high"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = var.infrastructure_container_specs.minio.cores
+  }
+
+  memory {
+    dedicated = var.infrastructure_container_specs.minio.memory
+    swap      = var.infrastructure_container_specs.minio.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_objects
+    size         = parseint(trimspace(replace(var.infrastructure_container_specs.minio.disk, "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-minio-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.72/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 2
+    up_delay   = 5
+    down_delay = 5
+  }
+}
+
+# Verdaccio NPM Registry
+resource "proxmox_virtual_environment_container" "verdaccio" {
+  node_name   = "pveserver2"
+  vm_id       = 303
+  description = "BTD Verdaccio NPM Registry"
+  tags        = ["infrastructure", "registry"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = var.infrastructure_container_specs.verdaccio.cores
+  }
+
+  memory {
+    dedicated = var.infrastructure_container_specs.verdaccio.memory
+    swap      = var.infrastructure_container_specs.verdaccio.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_services
+    size         = parseint(trimspace(replace(var.infrastructure_container_specs.verdaccio.disk, "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-verdaccio-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.73/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 2
+    up_delay   = 5
+    down_delay = 5
+  }
+}
+
+# HAProxy Load Balancer
+resource "proxmox_virtual_environment_container" "haproxy" {
+  node_name   = "pves3"
+  vm_id       = 304
+  description = "BTD HAProxy Load Balancer"
+  tags        = ["infrastructure", "loadbalancer", "critical"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = var.infrastructure_container_specs.haproxy.cores
+  }
+
+  memory {
+    dedicated = var.infrastructure_container_specs.haproxy.memory
+    swap      = var.infrastructure_container_specs.haproxy.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_services
+    size         = parseint(trimspace(replace(var.infrastructure_container_specs.haproxy.disk, "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-haproxy-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.74/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 3
+    up_delay   = 5
+    down_delay = 5
+  }
+}
+
+# Monitoring Stack (Prometheus + Grafana)
+resource "proxmox_virtual_environment_container" "monitoring" {
+  node_name   = "pveserver4"
+  vm_id       = 305
+  description = "BTD Monitoring Stack (Prometheus + Grafana)"
+  tags        = ["infrastructure", "monitoring"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = var.infrastructure_container_specs.monitoring.cores
+  }
+
+  memory {
+    dedicated = var.infrastructure_container_specs.monitoring.memory
+    swap      = var.infrastructure_container_specs.monitoring.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_services
+    size         = parseint(trimspace(replace(var.infrastructure_container_specs.monitoring.disk, "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-monitoring-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.75/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 3
+    up_delay   = 5
+    down_delay = 5
+  }
+}
+
+# =========================================================================
+# API GATEWAY (10.27.27.76, VMID 310)
+# =========================================================================
+
+# Orchestrator - API Gateway
+resource "proxmox_virtual_environment_container" "orchestrator" {
+  node_name   = "pveserver2"
+  vm_id       = 310
+  description = "BTD Orchestrator - API Gateway"
+  tags        = ["gateway", "orchestrator", "critical"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = var.gateway_container_specs.cores
+  }
+
+  memory {
+    dedicated = var.gateway_container_specs.memory
+    swap      = var.gateway_container_specs.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_services
+    size         = parseint(trimspace(replace(var.gateway_container_specs.disk, "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-orchestrator-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.76/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 10
+    up_delay   = 5
+    down_delay = 5
+  }
+}
+
+# =========================================================================
+# CORE SERVICES (10.27.27.77-82, VMIDs 311-316)
+# =========================================================================
+
+# Authentication Service
+resource "proxmox_virtual_environment_container" "auth" {
+  node_name   = "pveserver2"
+  vm_id       = 311
+  description = "BTD Authentication Service"
+  tags        = ["service", "auth", "core"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = var.service_container_specs.cores
+  }
+
+  memory {
+    dedicated = var.service_container_specs.memory
+    swap      = var.service_container_specs.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_services
+    size         = parseint(trimspace(replace(var.service_container_specs.disk, "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-auth-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.77/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 11
+    up_delay   = 2
+    down_delay = 2
+  }
+}
+
+# Users Service
+resource "proxmox_virtual_environment_container" "users" {
+  node_name   = "pves3"
+  vm_id       = 312
+  description = "BTD Users Service"
+  tags        = ["service", "users", "core"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = var.service_container_specs.cores
+  }
+
+  memory {
+    dedicated = var.service_container_specs.memory
+    swap      = var.service_container_specs.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_services
+    size         = parseint(trimspace(replace(var.service_container_specs.disk, "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-users-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.78/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 12
+    up_delay   = 2
+    down_delay = 2
+  }
+}
+
+# Permission Service
+resource "proxmox_virtual_environment_container" "permission" {
+  node_name   = "pveserver4"
+  vm_id       = 313
+  description = "BTD Permission Service"
+  tags        = ["service", "permission", "core"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = var.service_container_specs.cores
+  }
+
+  memory {
+    dedicated = var.service_container_specs.memory
+    swap      = var.service_container_specs.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_services
+    size         = parseint(trimspace(replace(var.service_container_specs.disk, "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-permission-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.79/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 13
+    up_delay   = 2
+    down_delay = 2
+  }
+}
+
+# Notification Service
+resource "proxmox_virtual_environment_container" "notification" {
+  node_name   = "pveserver2"
+  vm_id       = 314
+  description = "BTD Notification Service"
+  tags        = ["service", "notification", "core"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = var.service_container_specs.cores
+  }
+
+  memory {
+    dedicated = var.service_container_specs.memory
+    swap      = var.service_container_specs.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_services
+    size         = parseint(trimspace(replace(var.service_container_specs.disk, "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-notification-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.80/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 14
+    up_delay   = 2
+    down_delay = 2
+  }
+}
+
+# Messaging Service
+resource "proxmox_virtual_environment_container" "messaging" {
+  node_name   = "pves3"
+  vm_id       = 315
+  description = "BTD Messaging Service"
+  tags        = ["service", "messaging", "core"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = var.service_container_specs.cores
+  }
+
+  memory {
+    dedicated = lookup(var.service_overrides.messaging, "memory", var.service_container_specs.memory)
+    swap      = var.service_container_specs.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_services
+    size         = parseint(trimspace(replace(lookup(var.service_overrides.messaging, "disk", var.service_container_specs.disk), "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-messaging-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.81/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 15
+    up_delay   = 2
+    down_delay = 2
+  }
+}
+
+# Moderation Service
+resource "proxmox_virtual_environment_container" "moderation" {
+  node_name   = "pveserver4"
+  vm_id       = 316
+  description = "BTD Moderation Service"
+  tags        = ["service", "moderation", "core"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = var.service_container_specs.cores
+  }
+
+  memory {
+    dedicated = var.service_container_specs.memory
+    swap      = var.service_container_specs.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_services
+    size         = parseint(trimspace(replace(var.service_container_specs.disk, "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-moderation-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.82/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 16
+    up_delay   = 2
+    down_delay = 2
+  }
+}
+
+# =========================================================================
+# BUSINESS LOGIC SERVICES (10.27.27.83-89, VMIDs 317-323)
+# =========================================================================
+
+# Matches Service
+resource "proxmox_virtual_environment_container" "matches" {
+  node_name   = "pveserver2"
+  vm_id       = 317
+  description = "BTD Matches Service"
+  tags        = ["service", "matches", "business"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = lookup(var.service_overrides.matches, "cores", var.service_container_specs.cores)
+  }
+
+  memory {
+    dedicated = lookup(var.service_overrides.matches, "memory", var.service_container_specs.memory)
+    swap      = var.service_container_specs.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_services
+    size         = parseint(trimspace(replace(lookup(var.service_overrides.matches, "disk", var.service_container_specs.disk), "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-matches-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.83/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 20
+    up_delay   = 2
+    down_delay = 2
+  }
+}
+
+# Location Service
+resource "proxmox_virtual_environment_container" "location" {
+  node_name   = "pves3"
+  vm_id       = 318
+  description = "BTD Location Service"
+  tags        = ["service", "location", "business"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = var.service_container_specs.cores
+  }
+
+  memory {
+    dedicated = var.service_container_specs.memory
+    swap      = var.service_container_specs.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_services
+    size         = parseint(trimspace(replace(lookup(var.service_overrides.location, "disk", var.service_container_specs.disk), "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-location-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.84/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 21
+    up_delay   = 2
+    down_delay = 2
+  }
+}
+
+# Travel Service
+resource "proxmox_virtual_environment_container" "travel" {
+  node_name   = "pveserver4"
+  vm_id       = 319
+  description = "BTD Travel Service"
+  tags        = ["service", "travel", "business"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = var.service_container_specs.cores
+  }
+
+  memory {
+    dedicated = var.service_container_specs.memory
+    swap      = var.service_container_specs.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_services
+    size         = parseint(trimspace(replace(var.service_container_specs.disk, "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-travel-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.85/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 22
+    up_delay   = 2
+    down_delay = 2
+  }
+}
+
+# Payment Service
+resource "proxmox_virtual_environment_container" "payment" {
+  node_name   = "pveserver2"
+  vm_id       = 320
+  description = "BTD Payment Service"
+  tags        = ["service", "payment", "business"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = var.service_container_specs.cores
+  }
+
+  memory {
+    dedicated = var.service_container_specs.memory
+    swap      = var.service_container_specs.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_services
+    size         = parseint(trimspace(replace(var.service_container_specs.disk, "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-payment-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.86/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 23
+    up_delay   = 2
+    down_delay = 2
+  }
+}
+
+# Analytics Service
+resource "proxmox_virtual_environment_container" "analytics" {
+  node_name   = "pves3"
+  vm_id       = 321
+  description = "BTD Analytics Service"
+  tags        = ["service", "analytics", "business"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = var.service_container_specs.cores
+  }
+
+  memory {
+    dedicated = lookup(var.service_overrides.analytics, "memory", var.service_container_specs.memory)
+    swap      = var.service_container_specs.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_services
+    size         = parseint(trimspace(replace(lookup(var.service_overrides.analytics, "disk", var.service_container_specs.disk), "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-analytics-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.87/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 24
+    up_delay   = 2
+    down_delay = 2
+  }
+}
+
+# AI Service
+resource "proxmox_virtual_environment_container" "ai" {
+  node_name   = "pveserver4"
+  vm_id       = 322
+  description = "BTD AI Service"
+  tags        = ["service", "ai", "business"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = lookup(var.service_overrides.ai, "cores", var.service_container_specs.cores)
+  }
+
+  memory {
+    dedicated = lookup(var.service_overrides.ai, "memory", var.service_container_specs.memory)
+    swap      = var.service_container_specs.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_services
+    size         = parseint(trimspace(replace(lookup(var.service_overrides.ai, "disk", var.service_container_specs.disk), "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-ai-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.88/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 25
+    up_delay   = 2
+    down_delay = 2
+  }
+}
+
+# Video Call Service
+resource "proxmox_virtual_environment_container" "video_call" {
+  node_name   = "pveserver2"
+  vm_id       = 323
+  description = "BTD Video Call Service"
+  tags        = ["service", "video-call", "business"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = var.service_container_specs.cores
+  }
+
+  memory {
+    dedicated = lookup(var.service_overrides.video_call, "memory", var.service_container_specs.memory)
+    swap      = var.service_container_specs.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_services
+    size         = parseint(trimspace(replace(lookup(var.service_overrides.video_call, "disk", var.service_container_specs.disk), "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-video-call-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.89/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 26
+    up_delay   = 2
+    down_delay = 2
+  }
+}
+
+# =========================================================================
+# SUPPORT SERVICES (10.27.27.90-93, VMIDs 324-327)
+# =========================================================================
+
+# Admin Service
+resource "proxmox_virtual_environment_container" "admin" {
+  node_name   = "pves3"
+  vm_id       = 324
+  description = "BTD Admin Service"
+  tags        = ["service", "admin", "support"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = var.service_container_specs.cores
+  }
+
+  memory {
+    dedicated = var.service_container_specs.memory
+    swap      = var.service_container_specs.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_services
+    size         = parseint(trimspace(replace(var.service_container_specs.disk, "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-admin-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.90/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 30
+    up_delay   = 2
+    down_delay = 2
+  }
+}
+
+# Job Processing Service
+resource "proxmox_virtual_environment_container" "job_processing" {
+  node_name   = "pveserver4"
+  vm_id       = 325
+  description = "BTD Job Processing Service"
+  tags        = ["service", "job-processing", "support"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = var.service_container_specs.cores
+  }
+
+  memory {
+    dedicated = var.service_container_specs.memory
+    swap      = var.service_container_specs.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_services
+    size         = parseint(trimspace(replace(var.service_container_specs.disk, "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-job-processing-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.91/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 31
+    up_delay   = 2
+    down_delay = 2
+  }
+}
+
+# File Processing Service
+resource "proxmox_virtual_environment_container" "file_processing" {
+  node_name   = "pveserver2"
+  vm_id       = 326
+  description = "BTD File Processing Service"
+  tags        = ["service", "file-processing", "support"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = var.service_container_specs.cores
+  }
+
+  memory {
+    dedicated = lookup(var.service_overrides.file_processing, "memory", var.service_container_specs.memory)
+    swap      = var.service_container_specs.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_services
+    size         = parseint(trimspace(replace(lookup(var.service_overrides.file_processing, "disk", var.service_container_specs.disk), "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-file-processing-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.92/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 32
+    up_delay   = 2
+    down_delay = 2
+  }
+}
+
+# Match Request Limits Service
+resource "proxmox_virtual_environment_container" "match_limits" {
+  node_name   = "pves3"
+  vm_id       = 327
+  description = "BTD Match Request Limits Service"
+  tags        = ["service", "match-limits", "support"]
+
+  unprivileged  = var.unprivileged
+  start_on_boot = var.start_on_boot
+
+  cpu {
+    cores = var.service_container_specs.cores
+  }
+
+  memory {
+    dedicated = var.service_container_specs.memory
+    swap      = var.service_container_specs.swap
+  }
+
+  disk {
+    datastore_id = var.ceph_storage_services
+    size         = parseint(trimspace(replace(var.service_container_specs.disk, "G", "")), 10)
+  }
+
+  network_interface {
+    name   = "eth0"
+    bridge = var.network_bridge
+  }
+
+  operating_system {
+    template_file_id = var.container_template
+    type            = "ubuntu"
+  }
+
+  initialization {
+    hostname = "btd-match-limits-01.btd.internal"
+
+    dns {
+      servers = var.network_dns
+    }
+
+    ip_config {
+      ipv4 {
+        address = "10.27.27.93/24"
+        gateway = var.network_gateway
+      }
+    }
+
+    user_account {
+      keys = var.ssh_public_keys
+    }
+  }
+
+  startup {
+    order      = 33
+    up_delay   = 2
+    down_delay = 2
+  }
+}
+
+# =========================================================================
+# OUTPUTS
+# =========================================================================
+
+output "infrastructure_containers" {
+  value = {
+    postgres   = "10.27.27.70"
+    redis      = "10.27.27.71"
+    minio      = "10.27.27.72"
+    verdaccio  = "10.27.27.73"
+    haproxy    = "10.27.27.74"
+    monitoring = "10.27.27.75"
+  }
+  description = "IP addresses of infrastructure containers"
+}
+
+output "gateway_container" {
+  value = {
+    orchestrator = "10.27.27.76"
+  }
+  description = "IP address of the orchestrator gateway"
+}
+
+output "service_containers" {
+  value = {
+    auth            = "10.27.27.77"
+    users           = "10.27.27.78"
+    permission      = "10.27.27.79"
+    notification    = "10.27.27.80"
+    messaging       = "10.27.27.81"
+    moderation      = "10.27.27.82"
+    matches         = "10.27.27.83"
+    location        = "10.27.27.84"
+    travel          = "10.27.27.85"
+    payment         = "10.27.27.86"
+    analytics       = "10.27.27.87"
+    ai              = "10.27.27.88"
+    video_call      = "10.27.27.89"
+    admin           = "10.27.27.90"
+    job_processing  = "10.27.27.91"
+    file_processing = "10.27.27.92"
+    match_limits    = "10.27.27.93"
+  }
+  description = "IP addresses of all service containers"
+}

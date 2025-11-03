@@ -1,0 +1,411 @@
+#!/usr/bin/env groovy
+
+/**
+ * BTD Platform - Application-Only Deployment Pipeline
+ *
+ * Purpose: Deploy application updates without infrastructure changes
+ * Use Case: Code deployments, configuration updates, hotfixes
+ *
+ * Network: 10.27.27.0/23
+ * Jenkins Server: 10.27.27.251
+ */
+
+pipeline {
+    agent any
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '50'))
+        disableConcurrentBuilds()
+        timeout(time: 45, unit: 'MINUTES')
+        timestamps()
+        ansiColor('xterm')
+    }
+
+    parameters {
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['development', 'staging', 'production'],
+            description: 'Target deployment environment'
+        )
+        string(
+            name: 'SERVICES',
+            defaultValue: 'all',
+            description: 'Services to deploy (comma-separated or "all")'
+        )
+        booleanParam(
+            name: 'SKIP_TESTS',
+            defaultValue: false,
+            description: 'Skip test execution'
+        )
+        booleanParam(
+            name: 'SKIP_BUILD',
+            defaultValue: false,
+            description: 'Skip build (use existing artifacts)'
+        )
+        booleanParam(
+            name: 'RUN_MIGRATIONS',
+            defaultValue: true,
+            description: 'Run database migrations'
+        )
+        booleanParam(
+            name: 'ROLLING_DEPLOYMENT',
+            defaultValue: true,
+            description: 'Deploy services one at a time (reduces downtime)'
+        )
+    }
+
+    environment {
+        // Application configuration
+        BTD_APP_ROOT = '/root/projects/btd-app'
+        ANSIBLE_DIR = "${BTD_APP_ROOT}/btd-ansible"
+        JENKINS_DIR = "${BTD_APP_ROOT}/jenkins"
+
+        // Service list
+        MICROSERVICES = 'btd-auth-service,btd-users-service,btd-matches-service,btd-messaging-service,btd-notification-service,btd-payment-service,btd-admin-service,btd-analytics-service,btd-ai-service,btd-job-processing-service,btd-location-service,btd-match-request-limits-service,btd-moderation-service,btd-permission-service,btd-travel-service,btd-video-call-service,btd-orchestrator,file-processing-service'
+
+        // Credentials
+        GITHUB_CREDENTIALS_ID = 'github-pat-btd'
+        ANSIBLE_SSH_KEY_ID = 'ansible-ssh-private-key'
+        SLACK_WEBHOOK_ID = 'slack-webhook-url'
+
+        // Deployment tracking
+        DEPLOYMENT_ID = "${BUILD_NUMBER}-app-${new Date().format('yyyyMMdd-HHmmss')}"
+    }
+
+    stages {
+        stage('Initialization') {
+            steps {
+                script {
+                    echo "=========================================="
+                    echo "BTD Application Deployment"
+                    echo "=========================================="
+                    echo "Deployment ID: ${DEPLOYMENT_ID}"
+                    echo "Environment: ${params.ENVIRONMENT}"
+                    echo "Services: ${params.SERVICES}"
+                    echo "Rolling Deployment: ${params.ROLLING_DEPLOYMENT}"
+                    echo "=========================================="
+
+                    // Parse services to deploy
+                    if (params.SERVICES == 'all') {
+                        env.SERVICES_TO_DEPLOY = env.MICROSERVICES
+                    } else {
+                        env.SERVICES_TO_DEPLOY = params.SERVICES
+                    }
+
+                    echo "Services to deploy: ${env.SERVICES_TO_DEPLOY}"
+                }
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                script {
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: "*/${env.BRANCH_NAME ?: 'main'}"]],
+                        userRemoteConfigs: [[
+                            url: 'https://github.com/btd-app/btd-app.git',
+                            credentialsId: env.GITHUB_CREDENTIALS_ID
+                        ]],
+                        extensions: [
+                            [$class: 'CleanBeforeCheckout'],
+                            [$class: 'SubmoduleOption', recursiveSubmodules: true]
+                        ]
+                    ])
+
+                    env.GIT_COMMIT_HASH = sh(returnStdout: true, script: 'git rev-parse HEAD').trim()
+                    echo "Git Commit: ${env.GIT_COMMIT_HASH}"
+                }
+            }
+        }
+
+        stage('Build Services') {
+            when {
+                expression { params.SKIP_BUILD != true }
+            }
+            steps {
+                script {
+                    echo "Building services..."
+                    def services = env.SERVICES_TO_DEPLOY.split(',')
+
+                    // Build services in parallel
+                    def buildStages = [:]
+                    services.each { serviceName ->
+                        def service = serviceName.trim()
+                        buildStages[service] = {
+                            stage("Build ${service}") {
+                                dir(service) {
+                                    sh """
+                                        echo "Building ${service}..."
+                                        npm ci
+                                        npm run build
+
+                                        # Copy proto files
+                                        if [ -d "src/proto" ]; then
+                                            mkdir -p dist/src
+                                            cp -r src/proto dist/src/
+                                        fi
+
+                                        echo "✓ ${service} built successfully"
+                                    """
+                                }
+                            }
+                        }
+                    }
+
+                    parallel buildStages
+                }
+            }
+        }
+
+        stage('Run Tests') {
+            when {
+                expression { params.SKIP_TESTS != true && params.SKIP_BUILD != true }
+            }
+            parallel {
+                stage('Unit Tests') {
+                    steps {
+                        script {
+                            echo "Running unit tests..."
+                            def services = env.SERVICES_TO_DEPLOY.split(',')
+                            services.each { service ->
+                                dir(service.trim()) {
+                                    sh 'npm run test:unit || true'
+                                }
+                            }
+                        }
+                    }
+                }
+
+                stage('Lint & Typecheck') {
+                    steps {
+                        script {
+                            echo "Running lint and typecheck..."
+                            def services = env.SERVICES_TO_DEPLOY.split(',')
+                            services.each { service ->
+                                dir(service.trim()) {
+                                    sh """
+                                        npm run lint || true
+                                        npm run typecheck || true
+                                    """
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Pre-Deployment Health Check') {
+            steps {
+                script {
+                    echo "Checking current application health..."
+                    sh """
+                        chmod +x ${JENKINS_DIR}/scripts/post-deployment-health-check.sh
+                        ${JENKINS_DIR}/scripts/post-deployment-health-check.sh ${params.ENVIRONMENT} || {
+                            echo "⚠️  Warning: Some services are not healthy before deployment"
+                        }
+                    """
+                }
+            }
+        }
+
+        stage('Deployment Approval') {
+            when {
+                expression { params.ENVIRONMENT == 'production' }
+            }
+            steps {
+                script {
+                    timeout(time: 15, unit: 'MINUTES') {
+                        input message: "Deploy ${params.SERVICES} to production?",
+                              ok: 'Deploy',
+                              submitter: 'admin,devops-team'
+                    }
+                }
+            }
+        }
+
+        stage('Database Migrations') {
+            when {
+                expression { params.RUN_MIGRATIONS == true }
+            }
+            steps {
+                script {
+                    echo "Running database migrations..."
+                    dir(env.ANSIBLE_DIR) {
+                        withCredentials([
+                            sshUserPrivateKey(
+                                credentialsId: env.ANSIBLE_SSH_KEY_ID,
+                                keyFileVariable: 'SSH_KEY_FILE'
+                            )
+                        ]) {
+                            sh """
+                                ansible-playbook \
+                                    -i inventories/${params.ENVIRONMENT}/hosts.yml \
+                                    playbooks/run-migrations.yml \
+                                    --private-key=\${SSH_KEY_FILE} \
+                                    --extra-vars "environment=${params.ENVIRONMENT}" \
+                                    -v
+                            """
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Deploy Application') {
+            steps {
+                script {
+                    echo "Deploying application services..."
+                    dir(env.ANSIBLE_DIR) {
+                        withCredentials([
+                            sshUserPrivateKey(
+                                credentialsId: env.ANSIBLE_SSH_KEY_ID,
+                                keyFileVariable: 'SSH_KEY_FILE'
+                            )
+                        ]) {
+                            def extraVars = [
+                                "deployment_id=${DEPLOYMENT_ID}",
+                                "environment=${params.ENVIRONMENT}",
+                                "git_commit=${env.GIT_COMMIT_HASH}",
+                                "services_filter=${env.SERVICES_TO_DEPLOY}"
+                            ]
+
+                            if (params.ROLLING_DEPLOYMENT) {
+                                extraVars.add("serial=1")
+                            }
+
+                            sh """
+                                ansible-playbook \
+                                    -i inventories/${params.ENVIRONMENT}/hosts.yml \
+                                    playbooks/deploy-services.yml \
+                                    --private-key=\${SSH_KEY_FILE} \
+                                    --extra-vars "${extraVars.join(' ')}" \
+                                    --diff \
+                                    -v
+                            """
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Service Startup Wait') {
+            steps {
+                script {
+                    echo "Waiting for services to start..."
+                    sleep(time: 30, unit: 'SECONDS')
+                }
+            }
+        }
+
+        stage('Post-Deployment Health Check') {
+            steps {
+                script {
+                    echo "Verifying deployment health..."
+                    sh """
+                        chmod +x ${JENKINS_DIR}/scripts/post-deployment-health-check.sh
+                        ${JENKINS_DIR}/scripts/post-deployment-health-check.sh ${params.ENVIRONMENT}
+                    """
+                }
+            }
+        }
+
+        stage('Smoke Tests') {
+            when {
+                expression { params.ENVIRONMENT == 'production' }
+            }
+            steps {
+                script {
+                    echo "Running smoke tests..."
+                    sh """
+                        chmod +x ${JENKINS_DIR}/scripts/smoke-tests.sh
+                        ${JENKINS_DIR}/scripts/smoke-tests.sh ${params.ENVIRONMENT}
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                echo "=========================================="
+                echo "Application Deployment Successful!"
+                echo "=========================================="
+
+                withCredentials([string(credentialsId: env.SLACK_WEBHOOK_ID, variable: 'SLACK_WEBHOOK')]) {
+                    sh """
+                        curl -X POST \${SLACK_WEBHOOK} \
+                            -H 'Content-Type: application/json' \
+                            -d '{
+                                "text": "✅ BTD Application Deployed",
+                                "blocks": [
+                                    {
+                                        "type": "header",
+                                        "text": {
+                                            "type": "plain_text",
+                                            "text": "✅ Application Deployment Successful"
+                                        }
+                                    },
+                                    {
+                                        "type": "section",
+                                        "fields": [
+                                            {"type": "mrkdwn", "text": "*Environment:*\\n${params.ENVIRONMENT}"},
+                                            {"type": "mrkdwn", "text": "*Services:*\\n${params.SERVICES}"},
+                                            {"type": "mrkdwn", "text": "*Build:*\\n#${BUILD_NUMBER}"},
+                                            {"type": "mrkdwn", "text": "*Commit:*\\n${env.GIT_COMMIT_HASH?.take(8)}"}
+                                        ]
+                                    }
+                                ]
+                            }'
+                    """
+                }
+            }
+        }
+
+        failure {
+            script {
+                echo "=========================================="
+                echo "Application Deployment Failed!"
+                echo "=========================================="
+
+                // Attempt rollback
+                sh """
+                    chmod +x ${JENKINS_DIR}/scripts/rollback-deployment.sh
+                    ${JENKINS_DIR}/scripts/rollback-deployment.sh ${DEPLOYMENT_ID} ${params.ENVIRONMENT} || {
+                        echo "⚠️  Rollback failed - manual intervention required"
+                    }
+                """
+
+                withCredentials([string(credentialsId: env.SLACK_WEBHOOK_ID, variable: 'SLACK_WEBHOOK')]) {
+                    sh """
+                        curl -X POST \${SLACK_WEBHOOK} \
+                            -H 'Content-Type: application/json' \
+                            -d '{
+                                "text": "❌ BTD Application Deployment Failed",
+                                "blocks": [
+                                    {
+                                        "type": "section",
+                                        "fields": [
+                                            {"type": "mrkdwn", "text": "*Environment:*\\n${params.ENVIRONMENT}"},
+                                            {"type": "mrkdwn", "text": "*Services:*\\n${params.SERVICES}"},
+                                            {"type": "mrkdwn", "text": "*Action:*\\nRollback initiated"}
+                                        ]
+                                    },
+                                    {
+                                        "type": "section",
+                                        "text": {"type": "mrkdwn", "text": "View logs: ${BUILD_URL}console"}
+                                    }
+                                ]
+                            }'
+                    """
+                }
+            }
+        }
+
+        always {
+            archiveArtifacts artifacts: '**/build.log', allowEmptyArchive: true
+        }
+    }
+}

@@ -76,7 +76,9 @@
 | Service | IP Address | Port | Purpose |
 |---------|-----------|------|---------|
 | PostgreSQL | 10.27.27.70 | 5432 | Primary database server |
-| Redis | 10.27.27.71 | 6379 | Caching and pub/sub |
+| Redis (Development) | 10.27.27.68 | 6379 | Dev caching and pub/sub |
+| Redis (Staging) | 10.27.27.69 | 6379 | Staging caching and pub/sub |
+| Redis (Production) | 10.27.27.71 | 6379 | Prod caching and pub/sub |
 | MinIO | 10.27.27.72 | 9000, 9001 | Object storage |
 | Verdaccio | 10.27.27.18 | 4873 | Private npm registry |
 | HAProxy | 10.27.27.74 | 80, 443 | Load balancer |
